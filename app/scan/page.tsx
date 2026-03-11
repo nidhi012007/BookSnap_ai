@@ -2,17 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import mammoth from 'mammoth';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { 
-  Camera, 
-  Square, 
-  FlipHorizontal, 
   Download,
   ArrowLeft,
-  Zap,
   FileText,
   Eye,
   Sparkles,
@@ -34,78 +31,19 @@ interface ScanResult {
 
 export default function ScanPage() {
   const router = useRouter();
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   
-  const [isScanning, setIsScanning] = useState(false);
-  const [stream, setStream] = useState<MediaStream | null>(null);
   const [scanResults, setScanResults] = useState<ScanResult[]>([]);
   const [processingProgress, setProcessingProgress] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [scanMode, setScanMode] = useState<'camera' | 'upload'>('camera');
 
   useEffect(() => {
     // Check authentication
     const userData = localStorage.getItem('booksnap_user');
     if (!userData) {
       router.push('/');
-      return;
     }
-
-    return () => {
-      if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-      }
-    };
-  }, [router, stream]);
-
-  const startCamera = async () => {
-    try {
-      const mediaStream = await navigator.mediaDevices.getUserMedia({ 
-        video: { 
-          facingMode: 'environment',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
-        } 
-      });
-      
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-        setStream(mediaStream);
-        setIsScanning(true);
-      }
-    } catch (error) {
-      console.error('Error accessing camera:', error);
-      alert('Unable to access camera. Please check permissions and try again.');
-    }
-  };
-
-  const stopCamera = () => {
-    if (stream) {
-      stream.getTracks().forEach(track => track.stop());
-      setStream(null);
-    }
-    setIsScanning(false);
-  };
-
-  const captureImage = async () => {
-    if (!videoRef.current || !canvasRef.current) return;
-
-    const canvas = canvasRef.current;
-    const video = videoRef.current;
-    const ctx = canvas.getContext('2d');
-    
-    if (!ctx) return;
-
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    
-    ctx.drawImage(video, 0, 0);
-    const imageData = canvas.toDataURL('image/jpeg', 0.9);
-    
-    await processImage(imageData);
-  };
+  }, [router]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -113,79 +51,205 @@ export default function ScanPage() {
 
     const reader = new FileReader();
     reader.onload = async (e) => {
-      const imageData = e.target?.result as string;
-      await processImage(imageData);
+      const fileData = e.target?.result;
+      
+      try {
+        let extractedText = '';
+
+        if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+          extractedText = await extractTextFromPDF(fileData as ArrayBuffer);
+        } else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || file.name.endsWith('.docx')) {
+          extractedText = await extractTextFromDOCX(fileData as ArrayBuffer);
+        } else {
+          alert('Please upload a PDF or DOCX file');
+          return;
+        }
+
+        if (extractedText.trim()) {
+          await processText(extractedText);
+        } else {
+          alert('No text found in the document. Please try another file.');
+        }
+      } catch (error) {
+        console.error('Error processing file:', error);
+        alert('Error processing file. Please try again.');
+      }
     };
-    reader.readAsDataURL(file);
+    reader.onerror = () => {
+      alert('Error reading file. Please try again.');
+    };
+    reader.readAsArrayBuffer(file);
+
+    // Reset input so same file can be selected again
+    event.target.value = '';
   };
 
-  const processImage = async (imageData: string) => {
+  const extractTextFromPDF = async (fileData: ArrayBuffer): Promise<string> => {
+    // Dynamically import pdfjs only in browser
+    const pdfjsLib = await import('pdfjs-dist');
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+    
+    const pdf = await pdfjsLib.getDocument({ data: fileData }).promise;
+    let text = '';
+
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const pageText = content.items.map((item: any) => item.str).join(' ');
+      text += pageText + ' ';
+    }
+
+    return text;
+  };
+
+  const extractTextFromDOCX = async (fileData: ArrayBuffer): Promise<string> => {
+    const result = await mammoth.extractRawText({ arrayBuffer: fileData });
+    return result.value;
+  };
+
+  const processText = async (text: string) => {
     setIsProcessing(true);
     setProcessingProgress(0);
 
-    // Simulate OCR processing with progress
-    const progressSteps = [
-      { step: 'Analyzing image...', progress: 20 },
-      { step: 'Extracting text...', progress: 40 },
-      { step: 'Processing with AI...', progress: 60 },
-      { step: 'Generating insights...', progress: 80 },
-      { step: 'Finalizing results...', progress: 100 }
-    ];
+    try {
+      setProcessingProgress(30);
 
-    for (const { progress } of progressSteps) {
-      setProcessingProgress(progress);
-      await new Promise(resolve => setTimeout(resolve, 800));
+      const extractedText = text.trim();
+      
+      if (!extractedText) {
+        alert('No text found in the document.');
+        setIsProcessing(false);
+        return;
+      }
+
+      setProcessingProgress(70);
+
+      // Generate AI summary, keywords, and concepts from extracted text
+      const summary = generateSummary(extractedText);
+      const keywords = extractKeywords(extractedText);
+      const concepts = extractConcepts(extractedText);
+
+      setProcessingProgress(90);
+
+      const scanResult: ScanResult = {
+        id: `scan-${Date.now()}`,
+        image: '', // No image for document
+        extractedText,
+        confidence: 0.95, // High confidence for direct text extraction
+        aiSummary: summary,
+        keywords,
+        concepts
+      };
+
+      setScanResults(prev => [scanResult, ...prev]);
+      setProcessingProgress(100);
+      
+      // Reset after completion
+      setTimeout(() => {
+        setIsProcessing(false);
+        setProcessingProgress(0);
+      }, 500);
+
+    } catch (error) {
+      console.error('Error processing text:', error);
+      alert('Failed to process document. Please try again.');
+      setIsProcessing(false);
+      setProcessingProgress(0);
     }
+  };
 
-    // Simulate extracted text and AI analysis
-    const dummyTexts = [
-      "Machine learning is a subset of artificial intelligence that focuses on algorithms and statistical models that computer systems use to perform specific tasks without explicit instructions.",
-      "The quantum theory of light describes electromagnetic radiation as discrete packets of energy called photons. This revolutionary concept bridged classical and modern physics.",
-      "Photosynthesis is the process by which plants use sunlight, water, and carbon dioxide to produce glucose and oxygen, forming the foundation of most food chains on Earth.",
-      "Object-oriented programming organizes code into classes and objects, promoting code reusability, modularity, and maintainability in software development."
-    ];
+  // Generate a concise summary from extracted text
+  const generateSummary = (text: string): string => {
+    const sentences = text.match(/[^.!?]+[.!?]+/g) || [];
+    
+    if (sentences.length === 0) return 'No summary available.';
+    
+    // Take first 1-2 sentences as summary
+    let summary = sentences.slice(0, 2).join(' ').trim();
+    
+    // If too long, truncate to 200 characters
+    if (summary.length > 200) {
+      summary = summary.substring(0, 200) + '...';
+    }
+    
+    return summary || 'Text extracted successfully from the image.';
+  };
 
-    const dummyKeywords = [
-      ['machine learning', 'AI', 'algorithms', 'statistical models'],
-      ['quantum theory', 'photons', 'electromagnetic', 'physics'],
-      ['photosynthesis', 'glucose', 'oxygen', 'food chains'],
-      ['OOP', 'classes', 'objects', 'programming']
-    ];
+  // Extract meaningful keywords from text
+  const extractKeywords = (text: string): string[] => {
+    // Simple keyword extraction based on common important words
+    const stopWords = new Set([
+      'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+      'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does',
+      'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
+      'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'what', 'which', 'who',
+      'when', 'where', 'why', 'how', 'all', 'each', 'every', 'both', 'few', 'more', 'most'
+    ]);
 
-    const dummyConcepts = [
-      ['Artificial Intelligence', 'Computer Science', 'Data Processing'],
-      ['Quantum Physics', 'Light Theory', 'Modern Physics'],
-      ['Biology', 'Plant Science', 'Ecosystems'],
-      ['Software Engineering', 'Programming Paradigms', 'Code Structure']
-    ];
+    const words = text
+      .toLowerCase()
+      .match(/\b[a-z]+(?:'[a-z]+)?\b/g) || [];
 
-    const dummySummaries = [
-      'This text introduces machine learning as a key branch of AI, emphasizing its algorithmic approach to task completion.',
-      'An explanation of quantum light theory, highlighting the photon concept and its significance in physics.',
-      'Description of photosynthesis process and its crucial role in Earth\'s ecological systems.',
-      'Overview of object-oriented programming principles and their benefits in software development.'
-    ];
+    const wordFreq: { [key: string]: number } = {};
+    
+    words.forEach(word => {
+      if (word.length > 3 && !stopWords.has(word)) {
+        wordFreq[word] = (wordFreq[word] || 0) + 1;
+      }
+    });
 
-    const randomIndex = Math.floor(Math.random() * dummyTexts.length);
+    // Get top 6 keywords by frequency
+    const keywords = Object.entries(wordFreq)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([word]) => word);
 
-    const result: ScanResult = {
-      id: `scan-${Date.now()}`,
-      image: imageData,
-      extractedText: dummyTexts[randomIndex],
-      confidence: 0.92 + Math.random() * 0.07,
-      aiSummary: dummySummaries[randomIndex],
-      keywords: dummyKeywords[randomIndex],
-      concepts: dummyConcepts[randomIndex]
+    return keywords.length > 0 ? keywords : ['text', 'document', 'content'];
+  };
+
+  // Extract concepts/topics from text
+  const extractConcepts = (text: string): string[] => {
+    const conceptPatterns: { [key: string]: RegExp[] } = {
+      'Science & Technology': [
+        /\b(science|technology|research|study|data|algorithm|system|computer|digital|network)\b/gi,
+      ],
+      'Business & Economy': [
+        /\b(business|market|economy|finance|investment|company|enterprise|sales|profit)\b/gi,
+      ],
+      'Education & Learning': [
+        /\b(education|learning|study|knowledge|academic|student|teacher|course|training)\b/gi,
+      ],
+      'Health & Medicine': [
+        /\b(health|medical|disease|patient|treatment|doctor|hospital|medicine|therapy)\b/gi,
+      ],
+      'Environment & Nature': [
+        /\b(nature|environment|climate|water|air|forest|animal|plant|ecosystem)\b/gi,
+      ],
+      'Law & Governance': [
+        /\b(law|legal|government|policy|regulation|court|justice|right|constitution)\b/gi,
+      ],
+      'Arts & Culture': [
+        /\b(art|culture|music|literature|history|tradition|creative|design|performance)\b/gi,
+      ],
     };
 
-    setScanResults(prev => [result, ...prev]);
-    setIsProcessing(false);
-    setProcessingProgress(0);
+    const foundConcepts = new Set<string>();
 
-    // Stop camera after successful scan
-    if (scanMode === 'camera') {
-      stopCamera();
+    Object.entries(conceptPatterns).forEach(([concept, patterns]) => {
+      patterns.forEach(pattern => {
+        if (pattern.test(text)) {
+          foundConcepts.add(concept);
+        }
+      });
+    });
+
+    // If no concepts found, add generic ones
+    if (foundConcepts.size === 0) {
+      foundConcepts.add('General Knowledge');
+      foundConcepts.add('Information');
     }
+
+    return Array.from(foundConcepts).slice(0, 3);
   };
 
   const downloadPDF = (result: ScanResult) => {
@@ -233,20 +297,11 @@ Scan Date: ${new Date().toLocaleString()}
             
             <div className="flex items-center gap-2">
               <Button
-                variant={scanMode === 'camera' ? 'default' : 'outline'}
+                variant="default"
                 size="sm"
-                onClick={() => setScanMode('camera')}
-              >
-                <Camera className="w-4 h-4 mr-2" />
-                Camera
-              </Button>
-              <Button
-                variant={scanMode === 'upload' ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => setScanMode('upload')}
               >
                 <Upload className="w-4 h-4 mr-2" />
-                Upload
+                Upload File
               </Button>
             </div>
           </div>
@@ -260,91 +315,32 @@ Scan Date: ${new Date().toLocaleString()}
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
-                  {scanMode === 'camera' ? (
-                    <>
-                      <Camera className="w-5 h-5" />
-                      Camera Scanner
-                    </>
-                  ) : (
-                    <>
-                      <Upload className="w-5 h-5" />
-                      File Upload
-                    </>
-                  )}
+                  <Upload className="w-5 h-5" />
+                  Upload Document
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                {scanMode === 'camera' ? (
-                  <div className="space-y-4">
-                    <div className="aspect-[4/3] bg-black rounded-lg overflow-hidden relative">
-                      {isScanning ? (
-                        <video
-                          ref={videoRef}
-                          autoPlay
-                          playsInline
-                          className="w-full h-full object-cover"
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center bg-gray-100 dark:bg-gray-800">
-                          <div className="text-center">
-                            <Camera className="w-12 h-12 mx-auto text-gray-400 mb-4" />
-                            <p className="text-gray-500">Camera preview will appear here</p>
-                          </div>
-                        </div>
-                      )}
-                      
-                      {/* Overlay guide */}
-                      {isScanning && (
-                        <div className="absolute inset-4 border-2 border-white border-dashed rounded-lg flex items-center justify-center">
-                          <div className="text-white text-center">
-                            <Square className="w-8 h-8 mx-auto mb-2" />
-                            <p className="text-sm">Align text within this frame</p>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                    
-                    <div className="flex gap-2">
-                      {!isScanning ? (
-                        <Button onClick={startCamera} className="flex-1">
-                          <Camera className="w-4 h-4 mr-2" />
-                          Start Camera
-                        </Button>
-                      ) : (
-                        <>
-                          <Button onClick={captureImage} className="flex-1">
-                            <Zap className="w-4 h-4 mr-2" />
-                            Capture & Scan
-                          </Button>
-                          <Button variant="outline" onClick={stopCamera}>
-                            Stop
-                          </Button>
-                        </>
-                      )}
+                <div className="space-y-4">
+                  <div 
+                    className="aspect-[4/3] border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg flex items-center justify-center cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <div className="text-center">
+                      <FileText className="w-12 h-12 mx-auto text-gray-400 mb-4" />
+                      <p className="text-gray-500 mb-2">Click to upload a document</p>
+                      <p className="text-sm text-gray-400">Supports PDF and DOCX files</p>
                     </div>
                   </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div 
-                      className="aspect-[4/3] border-2 border-dashed border-gray-300 dark:border-gray-600 rounded-lg flex items-center justify-center cursor-pointer hover:bg-gray-50 dark:hover:bg-slate-800 transition-colors"
-                      onClick={() => fileInputRef.current?.click()}
-                    >
-                      <div className="text-center">
-                        <Upload className="w-12 h-12 mx-auto text-gray-400 mb-4" />
-                        <p className="text-gray-500 mb-2">Click to upload an image</p>
-                        <p className="text-sm text-gray-400">Supports JPG, PNG, HEIC</p>
-                      </div>
-                    </div>
-                    
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept="image/*"
-                      onChange={handleFileUpload}
-                      className="hidden"
-                    />
-                  </div>
-                )}
+                  
+                  <input
+                    key={`file-input-${scanResults.length}`}
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                </div>
                 
                 {/* Processing Progress */}
                 {isProcessing && (
@@ -363,9 +359,6 @@ Scan Date: ${new Date().toLocaleString()}
                 )}
               </CardContent>
             </Card>
-
-            {/* Hidden canvas for image capture */}
-            <canvas ref={canvasRef} className="hidden" />
 
             {/* Quick Tips */}
             <Card>
